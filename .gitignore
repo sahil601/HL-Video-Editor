@@ -1,0 +1,67 @@
+# ==============================================================================
+# HL Video Editor (.gitignore)
+# Configured to preserve all source, core algorithms, UI, .vnest support & assets
+# while excluding local build caches, huge binaries, dependencies, and temp files.
+# ==============================================================================
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build Outputs & Generated Packages
+# Note: Electron-builder outputs to release/ (installers, portable zips, win-unpacked).
+# The build/ folder contains source icons (icon.ico, icon.png) and is preserved.
+dist/
+dist-ssr/
+release/
+
+# Temporary directories and test run outputs
+temp_*/
+temp_*
+burned_captions_output.mp4
+test_speech_burned_export.mp4
+test_speech_captions.srt
+test_speech_captions.vtt
+*.tmp
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment Variables, Secrets & Signing Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+*.secret
+
+# OS & Filesystem Metadata
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE / Editor Files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
