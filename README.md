@@ -1,4 +1,4 @@
-# VNest — Professional Desktop Video Editor for Windows
+# HL — Professional Desktop Video Editor for Windows
 
 **VNest** is a modern, high-performance Windows desktop video editor built with **React 19, TypeScript, Electron, bundled FFmpeg/FFprobe, and JSZip**. Designed around seamless turn-based collaboration and portable projects, VNest allows you and your friends to edit projects on separate Windows computers without missing media files or broken timelines.
 
