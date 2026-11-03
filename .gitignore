@@ -24,6 +24,7 @@ test_speech_burned_export.mp4
 test_speech_captions.srt
 test_speech_captions.vtt
 *.tmp
+*.bundle
 
 # Logs
 logs/
