@@ -115,9 +115,20 @@ export function validateProjectForExport(
     errors.push(`Invalid frame rate: ${preset.fps} fps. Frame rate must be between 1 and 240 fps.`);
   }
 
-  // 4. Destination Checks
+  // 4. Destination Checks & Container Compatibility
   if (!outputPath || outputPath.trim().length === 0) {
     errors.push('Destination path is required. Click "Choose" to select an output destination file.');
+  } else {
+    const lowerDest = outputPath.toLowerCase().trim();
+    if (preset.codec === 'prores_ks' || preset.codec === 'prores') {
+      if (!lowerDest.endsWith('.mov') && !lowerDest.endsWith('.mkv')) {
+        errors.push('Apple ProRes encoding requires a .mov or .mkv container format. Please change the export file extension to .mov.');
+      }
+    } else if (preset.codec === 'libvpx-vp9') {
+      if (!lowerDest.endsWith('.webm') && !lowerDest.endsWith('.mkv')) {
+        errors.push('VP9 video encoding requires a .webm or .mkv container format. Please change the export file extension to .webm.');
+      }
+    }
   }
 
   // 5. Warnings (Non-fatal advisory notices)

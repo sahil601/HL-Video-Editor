@@ -246,6 +246,40 @@ export const EXPORT_PRESETS: ProfessionalExportPreset[] = [
 ];
 
 /**
+ * Safely escapes a file path for inclusion inside an FFmpeg filter argument
+ * (e.g. subtitles='path' or lut3d=file='path').
+ * Handles Windows drive colons, backslashes, spaces, commas, brackets, semicolons, and quotes.
+ */
+export function escapeFFmpegFilterPath(filePath: string): string {
+  return filePath
+    .replace(/\\/g, '/')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "'\\\\''")
+    .replace(/,/g, '\\,')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/;/g, '\\;');
+}
+
+/**
+ * Converts a hex color (#RRGGBB or #RGB) into ASS subtitle format &HAABBGGRR
+ */
+export function hexToAssColor(hex?: string, alphaHex = '00'): string {
+  if (!hex || !hex.startsWith('#')) return '&H00FFFFFF';
+  let clean = hex.replace('#', '').trim();
+  if (clean.length === 3) {
+    clean = clean.split('').map((c) => c + c).join('');
+  }
+  if (clean.length === 6) {
+    const r = clean.substring(0, 2);
+    const g = clean.substring(2, 4);
+    const b = clean.substring(4, 6);
+    return `&H${alphaHex}${b}${g}${r}`.toUpperCase();
+  }
+  return '&H00FFFFFF';
+}
+
+/**
  * Builds standard FFmpeg arguments for rendering a project timeline
  */
 export function buildFFmpegExportArgs(
@@ -258,12 +292,12 @@ export function buildFFmpegExportArgs(
     captionStyle?: import('./captions/types').CaptionStyle;
     lutPathResolver?: (clipId: string) => string | null;
     encoderOverride?: string;
+    hasAudioResolver?: (clip: Clip, resolvedPath: string) => boolean;
   }
 ): { args: string[]; inputFiles: string[] } {
   const args: string[] = ['-y']; // Overwrite output
   const inputFiles: string[] = [];
   const fileToInputIndex = new Map<string, number>();
-
 
   // Collect all unique media files used by clips on timeline
   const activeClips: Clip[] = [];
@@ -286,17 +320,19 @@ export function buildFFmpegExportArgs(
     args.push('-i', file);
   }
 
-  // If there are no clips, generate color background
+  // If there are no clips, generate compliant color background with silent audio
   if (activeClips.length === 0) {
+    const emptyDurationSec = 5;
     args.push(
-      '-f', 'lavfi',
-      '-i', `color=c=${project.settings.backgroundColor || '#000000'}:s=${preset.width}x${preset.height}:d=5:r=${preset.fps}`,
-      '-f', 'lavfi',
-      '-i', 'anullsrc=r=48000:cl=stereo',
-      '-c:v', preset.codec,
+      '-filter_complex',
+      `color=c=${project.settings.backgroundColor || '#000000'}:s=${preset.width}x${preset.height}:d=${emptyDurationSec}:r=${preset.fps}[base];anullsrc=r=48000:cl=stereo,atrim=duration=${emptyDurationSec}[silent]`,
+      '-map', '[base]',
+      '-map', '[silent]',
+      '-c:v', preset.codec || 'libx264',
       '-c:a', 'aac',
+      '-b:a', preset.audioBitrate || '128k',
       '-pix_fmt', 'yuv420p',
-      '-shortest',
+      '-r', String(preset.fps),
       outputPath
     );
     return { args, inputFiles };
@@ -314,14 +350,17 @@ export function buildFFmpegExportArgs(
   let currentCanvasTag = 'base';
   let overlayIndex = 0;
 
-  // 2. Process visual tracks (video, overlay, image) in bottom-to-top order
+  // 2. Process visual tracks (video, overlay, elements) in bottom-to-top order
   const visualTracks = project.tracks
-    .filter((t) => (t.type === 'video' || t.type === 'overlay') && !t.isMuted && !t.isHidden)
+    .filter((t) => t.type !== 'audio' && !t.isMuted && !t.isHidden)
     .sort((a, b) => b.order - a.order);
 
   for (const track of visualTracks) {
     const sortedClips = [...track.clips].sort((a, b) => a.startMs - b.startMs);
     for (const clip of sortedClips) {
+      // If subtitle burning is enabled, skip text clips here as they are burned via the subtitles filter
+      if (options?.subtitleSrtPath && clip.type === 'text') continue;
+
       const resolvedPath = (clip.assetId ? assetPathResolver(clip.assetId) : null) || assetPathResolver(clip.id);
       if (!resolvedPath || !fileToInputIndex.has(resolvedPath)) continue;
 
@@ -596,7 +635,7 @@ export function buildFFmpegExportArgs(
 
   // 2B. Burn Subtitles / Captions if requested
   if (options?.subtitleSrtPath) {
-    const srtNormalized = options.subtitleSrtPath.replace(/\\/g, '/').replace(':', '\\:');
+    const srtNormalized = escapeFFmpegFilterPath(options.subtitleSrtPath);
     const subtitleCanvasTag = `layer_subtitles`;
     const style = options.captionStyle;
     const baseFontSize = style?.fontSize || 28;
@@ -604,12 +643,14 @@ export function buildFFmpegExportArgs(
     const alignment = (style?.positionY ?? 35) < -15 ? 5 : (style?.positionY ?? 35) > 15 ? 2 : 8;
     const marginV = Math.abs(Math.round(((style?.positionY ?? 35) / 100) * preset.height));
     const strokeWidth = style?.strokeWidth ?? 2;
+    const primaryColor = hexToAssColor(style?.color || '#ffffff');
+    const outlineColor = hexToAssColor(style?.strokeColor || '#000000');
 
     const forceStyle = [
       `Fontname=${style?.fontFamily || 'Arial'}`,
       `FontSize=${scaledFontSize}`,
-      `PrimaryColour=&H00FFFFFF`,
-      `OutlineColour=&H00000000`,
+      `PrimaryColour=${primaryColor}`,
+      `OutlineColour=${outlineColor}`,
       `BorderStyle=1`,
       `Outline=${strokeWidth}`,
       `Alignment=${alignment}`,
@@ -641,8 +682,29 @@ export function buildFFmpegExportArgs(
   for (const track of project.tracks) {
     if (track.isMuted) continue;
     for (const clip of track.clips) {
+      // 1. Clips without audio streams must not be referenced as [inputIdx:a]
+      if (clip.type === 'image' || clip.type === 'element' || clip.type === 'text') {
+        continue;
+      }
+
       const resolvedPath = (clip.assetId ? assetPathResolver(clip.assetId) : null) || assetPathResolver(clip.id);
       if (!resolvedPath || !fileToInputIndex.has(resolvedPath)) continue;
+
+      // 2. Check if asset metadata or extension confirms lack of audio stream
+      const asset = project.assets.find((a) => a.id === clip.assetId || a.id === clip.id);
+      if (asset) {
+        if (asset.type === 'image') continue;
+        if (asset.hasAudio === false) continue;
+      }
+      const lower = resolvedPath.toLowerCase();
+      if (/\.(png|jpe?g|webp|gif|svg|bmp|ico|tiff?)$/.test(lower)) {
+        continue;
+      }
+
+      // 3. Check custom hasAudioResolver predicate if provided
+      if (options?.hasAudioResolver && !options.hasAudioResolver(clip, resolvedPath)) {
+        continue;
+      }
 
       // Only include if clip has audible volume
       const volume = clip.volume !== undefined ? clip.volume : 1.0;
@@ -727,40 +789,34 @@ export function buildFFmpegExportArgs(
   if (audioStreamTags.length > 0) {
     filtergraph.push(...audioFilters);
     if (audioStreamTags.length === 1) {
-      finalAudioTag = audioStreamTags[0];
+      filtergraph.push(`${audioStreamTags[0]}atrim=duration=${totalDurationSec}[a_final]`);
+      finalAudioTag = '[a_final]';
     } else {
-      filtergraph.push(`${audioStreamTags.join('')}amix=inputs=${audioStreamTags.length}:duration=longest:dropout_transition=2[a_mixed]`);
+      filtergraph.push(
+        `${audioStreamTags.join('')}amix=inputs=${audioStreamTags.length}:duration=longest:dropout_transition=2,atrim=duration=${totalDurationSec}[a_mixed]`
+      );
       finalAudioTag = '[a_mixed]';
     }
+  } else {
+    // Generate compliant silent audio track directly within filter_complex
+    filtergraph.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDurationSec}[a_silent]`);
+    finalAudioTag = '[a_silent]';
   }
 
   // Connect filtergraph
   args.push('-filter_complex', filtergraph.join(';'));
   args.push('-map', `[${currentCanvasTag}]`);
+  args.push('-map', finalAudioTag);
 
   const profPreset = preset as ProfessionalExportPreset;
   const audioCodec = profPreset.audioCodec || 'aac';
 
-  if (finalAudioTag) {
-    args.push('-map', finalAudioTag);
-    if (audioCodec === 'pcm_s16le') {
-      args.push('-c:a', 'pcm_s16le');
-    } else if (audioCodec === 'libmp3lame') {
-      args.push('-c:a', 'libmp3lame', '-b:a', preset.audioBitrate);
-    } else {
-      args.push('-c:a', 'aac', '-b:a', preset.audioBitrate);
-    }
+  if (audioCodec === 'pcm_s16le') {
+    args.push('-c:a', 'pcm_s16le');
+  } else if (audioCodec === 'libmp3lame') {
+    args.push('-c:a', 'libmp3lame', '-b:a', preset.audioBitrate || '192k');
   } else {
-    // Generate compliant silent audio track if no clips had audio
-    args.push('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo');
-    args.push('-map', `${inputFiles.length}:a`);
-    if (audioCodec === 'pcm_s16le') {
-      args.push('-c:a', 'pcm_s16le', '-shortest');
-    } else if (audioCodec === 'libmp3lame') {
-      args.push('-c:a', 'libmp3lame', '-b:a', '128k', '-shortest');
-    } else {
-      args.push('-c:a', 'aac', '-b:a', '128k', '-shortest');
-    }
+    args.push('-c:a', 'aac', '-b:a', preset.audioBitrate || '192k');
   }
 
   // Video encoding flags

@@ -118,6 +118,7 @@ export interface VnestNativeBridge {
   }>;
   cancelProxyJob: (jobId: string) => Promise<{ success: boolean; error?: string }>;
   deleteProxyFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  deleteFile?: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   onProxyProgress: (callback: (data: { jobId: string; percent: number; speed?: string }) => void) => () => void;
   selectDirectory: () => Promise<string | null>;
   scanDirectoryMedia: (dirPath: string) => Promise<{

@@ -344,8 +344,15 @@ ipcMain.handle('start-ffmpeg-export', async (event, exportArgs, totalDurationMs,
     activeExportTempPath = tempOutputPath || null;
     activeExportProcess = spawn(ffmpegPath, exportArgs);
 
+    const stderrLines = [];
     activeExportProcess.stderr.on('data', (data) => {
       const line = data.toString();
+      // Keep last 40 lines for accurate diagnostic reporting upon failure
+      const splitLines = line.split(/\r?\n/).filter(Boolean);
+      for (const l of splitLines) {
+        stderrLines.push(l);
+        if (stderrLines.length > 40) stderrLines.shift();
+      }
       // Send raw progress lines to renderer
       if (mainWindow) {
         mainWindow.webContents.send('ffmpeg-export-progress', { line, totalDurationMs });
@@ -409,11 +416,16 @@ ipcMain.handle('start-ffmpeg-export', async (event, exportArgs, totalDurationMs,
                   });
                 }
 
-                // Atomic replace to final output path
+                // Atomic replace to final output path (with cross-device EXDEV fallback)
                 if (fs.existsSync(finalOutputPath)) {
                   try { fs.unlinkSync(finalOutputPath); } catch (e) {}
                 }
-                fs.renameSync(tempOutputPath, finalOutputPath);
+                try {
+                  fs.renameSync(tempOutputPath, finalOutputPath);
+                } catch (renameErr) {
+                  fs.copyFileSync(tempOutputPath, finalOutputPath);
+                  try { fs.unlinkSync(tempOutputPath); } catch (e) {}
+                }
                 activeExportTempPath = null;
 
                 const finalStat = fs.statSync(finalOutputPath);
@@ -447,7 +459,22 @@ ipcMain.handle('start-ffmpeg-export', async (event, exportArgs, totalDurationMs,
           try { fs.unlinkSync(tempOutputPath); } catch (e) {}
         }
         activeExportTempPath = null;
-        resolve({ success: false, error: `FFmpeg export process exited with code ${code}` });
+        
+        // Extract meaningful error lines from stderr, filtering out informational stats
+        const meaningfulErrors = stderrLines.filter(
+          (l) =>
+            !l.startsWith('frame=') &&
+            !l.startsWith('size=') &&
+            !l.startsWith('Press [q]') &&
+            !l.includes('ffmpeg version') &&
+            !l.includes('built with') &&
+            !l.includes('configuration:')
+        );
+        const lastError = meaningfulErrors.slice(-6).join('; ') || `Process exited with code ${code}`;
+        resolve({
+          success: false,
+          error: `FFmpeg export failed (code ${code}): ${lastError}`,
+        });
       }
     });
 
@@ -457,7 +484,7 @@ ipcMain.handle('start-ffmpeg-export', async (event, exportArgs, totalDurationMs,
         try { fs.unlinkSync(tempOutputPath); } catch (e) {}
       }
       activeExportTempPath = null;
-      resolve({ success: false, error: err.message });
+      resolve({ success: false, error: `FFmpeg spawn error: ${err.message}` });
     });
   });
 });
@@ -1028,6 +1055,19 @@ ipcMain.handle('delete-proxy-file', async (event, filePath) => {
       return { success: true };
     }
     return { success: false, error: 'File does not exist' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 21b. Delete Any Temporary File Safely
+ipcMain.handle('delete-file', async (event, filePath) => {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      return { success: true };
+    }
+    return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
   }

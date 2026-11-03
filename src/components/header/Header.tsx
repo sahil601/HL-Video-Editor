@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Home,
   Undo2,
@@ -16,8 +16,11 @@ import {
   Gauge,
   AlertCircle,
   RotateCcw,
+  Loader2,
 } from 'lucide-react';
 import { AspectRatio, Project } from '../../types/project';
+import { ExportQueueManager } from '../../core/exportQueue';
+import { ExportQueueJob } from '../../types/export';
 
 interface HeaderProps {
   project: Project;
@@ -70,6 +73,16 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
   const [tempName, setTempName] = useState(project.name);
+  const [activeExportJob, setActiveExportJob] = useState<ExportQueueJob | null>(null);
+
+  useEffect(() => {
+    const queueManager = ExportQueueManager.getInstance();
+    const unsub = queueManager.subscribe((jobs) => {
+      const active = jobs.find((j) => j.status === 'rendering' || j.status === 'validating');
+      setActiveExportJob(active || null);
+    });
+    return unsub;
+  }, []);
 
   const ratios: { id: AspectRatio; label: string }[] = [
     { id: '16:9', label: '16:9 Widescreen' },
@@ -373,11 +386,28 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           onClick={onExport}
           className="vnest-btn-primary"
-          style={{ flexShrink: 0, minWidth: 'max-content' }}
-          title="Render & Export final video via FFmpeg"
+          style={{
+            flexShrink: 0,
+            minWidth: 'max-content',
+            backgroundColor: activeExportJob ? 'var(--accent-indigo)' : undefined,
+          }}
+          title={
+            activeExportJob
+              ? `Exporting: ${activeExportJob.statusMessage} (${activeExportJob.progress}% - click to open queue)`
+              : 'Render & Export final video via FFmpeg'
+          }
         >
-          <Download style={{ width: 14, height: 14 }} />
-          <span>Export</span>
+          {activeExportJob ? (
+            <>
+              <Loader2 className="vnest-spin" style={{ width: 14, height: 14 }} />
+              <span>Exporting {activeExportJob.progress}%</span>
+            </>
+          ) : (
+            <>
+              <Download style={{ width: 14, height: 14 }} />
+              <span>Export</span>
+            </>
+          )}
         </button>
       </div>
     </header>

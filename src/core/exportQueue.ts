@@ -128,6 +128,7 @@ export class ExportQueueManager {
     elementPathMap?: Map<string, string>;
     blobPathMap?: Map<string, string>;
     lutPathMap?: Map<string, string>;
+    tempFiles?: string[];
     assetPathResolver: (id: string) => string | null;
   }): ExportQueueJob {
     const jobId = 'job_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
@@ -157,6 +158,7 @@ export class ExportQueueManager {
       elementPathMap: params.elementPathMap,
       blobPathMap: params.blobPathMap,
       lutPathMap: params.lutPathMap,
+      tempFiles: params.tempFiles || [],
       assetPathResolver: params.assetPathResolver,
     };
 
@@ -321,6 +323,19 @@ export class ExportQueueManager {
 
       nextJob.encoderUsed = effectiveCodec;
 
+      const hasAudioResolver = (clip: any, resolvedPath: string): boolean => {
+        if (clip.type === 'image' || clip.type === 'element' || clip.type === 'text') return false;
+        const asset = ctx.project.assets.find((a: any) => a.id === clip.assetId || a.id === clip.id);
+        if (asset) {
+          if (asset.type === 'image') return false;
+          if (asset.hasAudio === false) return false;
+          if (asset.hasAudio === true) return true;
+        }
+        const lower = resolvedPath.toLowerCase();
+        if (/\.(png|jpe?g|webp|gif|svg|bmp|ico|tiff?)$/.test(lower)) return false;
+        return true;
+      };
+
       // Build FFmpeg command arguments targeting temporary output path
       const { args } = buildFFmpegExportArgs(
         ctx.project,
@@ -332,6 +347,7 @@ export class ExportQueueManager {
           captionStyle: ctx.captionStyle,
           lutPathResolver: (clipId: string) => ctx.lutPathMap?.get(clipId) || null,
           encoderOverride: effectiveCodec,
+          hasAudioResolver,
         }
       );
 
@@ -350,7 +366,7 @@ export class ExportQueueManager {
         });
         this.currentJobCleanup = cleanupListener;
 
-        const res = await bridge.startFFmpegExport(
+        let res = await bridge.startFFmpegExport(
           args,
           ctx.project.durationMs,
           nextJob.tempPath,
@@ -359,6 +375,50 @@ export class ExportQueueManager {
 
         cleanupListener();
         this.currentJobCleanup = null;
+
+        // If hardware acceleration failed, automatically retry with software encoder
+        if (!res.success && (nextJob.status as ExportJobStatus) !== 'cancelled' && effectiveCodec !== 'libx264' && effectiveCodec !== 'prores_ks') {
+          console.warn(`Hardware encoder ${effectiveCodec} failed. Falling back to universal software encoder (libx264)...`);
+          nextJob.statusMessage = `Encoder ${effectiveCodec} failed. Retrying with software CPU encoder (libx264)...`;
+          effectiveCodec = 'libx264';
+          nextJob.encoderUsed = 'libx264';
+          this.notify();
+
+          const fallbackArgs = buildFFmpegExportArgs(
+            ctx.project,
+            nextJob.preset,
+            nextJob.tempPath || nextJob.destinationPath,
+            effectiveResolver,
+            {
+              subtitleSrtPath: ctx.tempSrtPath,
+              captionStyle: ctx.captionStyle,
+              lutPathResolver: (clipId: string) => ctx.lutPathMap?.get(clipId) || null,
+              encoderOverride: 'libx264',
+              hasAudioResolver,
+            }
+          ).args;
+
+          const retryCleanup = bridge.onFFmpegProgress(({ line, totalDurationMs }) => {
+            if (nextJob.status !== 'rendering') return;
+            const pct = parseFFmpegProgress(line, totalDurationMs);
+            if (pct !== null) {
+              nextJob.progress = pct;
+              nextJob.statusMessage = `Rendering frames with software fallback (${pct}%)...`;
+              this.notify();
+            }
+          });
+          this.currentJobCleanup = retryCleanup;
+
+          res = await bridge.startFFmpegExport(
+            fallbackArgs,
+            ctx.project.durationMs,
+            nextJob.tempPath,
+            nextJob.destinationPath
+          );
+
+          retryCleanup();
+          this.currentJobCleanup = null;
+        }
 
         if ((nextJob.status as ExportJobStatus) === 'cancelled') {
           // Already handled via cancelJob
@@ -409,6 +469,44 @@ export class ExportQueueManager {
       nextJob.completedAt = Date.now();
       this.recordToHistory(nextJob);
     } finally {
+      // Clean up temporary files created for this export job
+      try {
+        const bridge = getNativeBridge();
+        const deleteFn = bridge?.deleteFile || bridge?.deleteProxyFile;
+        if (deleteFn) {
+          const filesToDelete: string[] = [];
+          if (ctx.tempSrtPath) filesToDelete.push(ctx.tempSrtPath);
+          if (ctx.elementPathMap) {
+            for (const v of ctx.elementPathMap.values()) {
+              if (typeof v === 'string') filesToDelete.push(v);
+            }
+          }
+          if (ctx.blobPathMap) {
+            for (const v of ctx.blobPathMap.values()) {
+              if (typeof v === 'string') filesToDelete.push(v);
+            }
+          }
+          if (ctx.lutPathMap) {
+            for (const v of ctx.lutPathMap.values()) {
+              if (typeof v === 'string') filesToDelete.push(v);
+            }
+          }
+          if (ctx.tempFiles && Array.isArray(ctx.tempFiles)) {
+            for (const v of ctx.tempFiles) {
+              if (typeof v === 'string') filesToDelete.push(v);
+            }
+          }
+
+          for (const f of filesToDelete) {
+            try {
+              if (f) await deleteFn(f);
+            } catch {}
+          }
+        }
+      } catch (cleanupErr) {
+        console.warn('Failed to clean up export temp files:', cleanupErr);
+      }
+
       this.isProcessing = false;
       this.notify();
       // Continue to next queued item

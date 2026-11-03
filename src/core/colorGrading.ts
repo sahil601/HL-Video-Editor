@@ -180,7 +180,14 @@ export function buildColorGradingFFmpegFilters(
   if (lut && lut.enabled) {
     const targetPath = resolvedLutPath || lut.filePath;
     if (targetPath) {
-      const normalizedPath = targetPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+      const normalizedPath = targetPath
+        .replace(/\\/g, '/')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, "'\\\\''")
+        .replace(/,/g, '\\,')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]')
+        .replace(/;/g, '\\;');
       filters.push(`lut3d=file='${normalizedPath}':interp=tetrahedral`);
     }
   }

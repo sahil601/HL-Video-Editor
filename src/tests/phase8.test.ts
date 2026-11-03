@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createDefaultProject } from '../core/project';
 import { Project, Clip } from '../types/project';
-import { EXPORT_PRESETS, buildFFmpegExportArgs, parseFFmpegProgress } from '../core/ffmpeg';
+import {
+  EXPORT_PRESETS,
+  buildFFmpegExportArgs,
+  parseFFmpegProgress,
+  escapeFFmpegFilterPath,
+  hexToAssColor,
+} from '../core/ffmpeg';
 import { ProfessionalExportPreset, DetectedEncoder } from '../types/export';
 import { validateProjectForExport, sanitizeExportFilename } from '../core/exportValidation';
 import { ExportQueueManager, ExportHistoryManager } from '../core/exportQueue';
@@ -683,6 +689,214 @@ describe('Phase 8 — Export & Professional Workflow System', () => {
         assetPathResolver: (id) => project.assets.find((a) => a.id === id)?.originalPath || null,
       });
       expect(draftJob.useProxies).toBe(true);
+    });
+  });
+
+  describe('9. Robust Filter Path Escaping & ASS Color Formatting', () => {
+    it('properly escapes Windows colons, backslashes, spaces, commas, brackets, and quotes for FFmpeg filters', () => {
+      const normalPath = 'C:\\Projects\\HL\\test.srt';
+      expect(escapeFFmpegFilterPath(normalPath)).toBe('C\\:/Projects/HL/test.srt');
+
+      const complexPath = "C:\\My Videos (2026)\\[Drafts], 'Final'\\captions, part 1.srt";
+      const escaped = escapeFFmpegFilterPath(complexPath);
+      expect(escaped).toContain('C\\:');
+      expect(escaped).toContain('\\[Drafts\\]');
+      expect(escaped).toContain('\\,');
+      expect(escaped).not.toContain('C:\\');
+      expect(escaped).toContain('Final');
+    });
+
+    it('converts hex colors to ASS color codes with &HAABBGGRR order', () => {
+      expect(hexToAssColor('#ffffff')).toBe('&H00FFFFFF');
+      expect(hexToAssColor('#000000')).toBe('&H00000000');
+      expect(hexToAssColor('#ff0000')).toBe('&H000000FF'); // Red in ASS is BB=00, GG=00, RR=FF
+      expect(hexToAssColor('#00ff00')).toBe('&H0000FF00'); // Green in ASS
+      expect(hexToAssColor('#0000ff')).toBe('&H00FF0000'); // Blue in ASS is BB=FF, GG=00, RR=00
+      expect(hexToAssColor('#ffff00')).toBe('&H0000FFFF'); // Yellow in ASS
+    });
+  });
+
+  describe('10. Audio Filtering for Silent Media & Image Clips', () => {
+    it('never creates [input:a] streams for image clips, elements, or silent media', () => {
+      const project = createDefaultProject('Image Audio Test', '16:9');
+      project.durationMs = 4000;
+      project.assets = [
+        {
+          id: 'asset_img_1',
+          name: 'photo.png',
+          type: 'image',
+          relativePath: 'assets/photo.png',
+          originalPath: 'C:/Media/photo.png',
+          fileSize: 102400,
+          durationMs: 4000,
+          isBundled: true,
+          hasAudio: false,
+        },
+      ];
+
+      const imgClip: Clip = {
+        id: 'clip_img_1',
+        assetId: 'asset_img_1',
+        trackId: 'track_video_main',
+        name: 'Photo Slide',
+        type: 'image',
+        startMs: 0,
+        durationMs: 4000,
+        sourceStartMs: 0,
+        sourceEndMs: 4000,
+        speed: 1,
+        volume: 1,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        transform: { positionX: 0, positionY: 0, scale: 1, rotation: 0, opacity: 1 },
+        keyframes: [],
+      };
+      project.tracks[2].clips = [imgClip];
+
+      const { args } = buildFFmpegExportArgs(
+        project,
+        EXPORT_PRESETS[0],
+        'C:/Exports/silent_image.mp4',
+        () => 'C:/Media/photo.png'
+      );
+
+      // Verify no [0:a] filter exists in filtergraph
+      const filterComplexArg = args[args.indexOf('-filter_complex') + 1];
+      expect(filterComplexArg).not.toContain('[0:a]');
+
+      // Verify compliant silent audio generation directly within filtergraph
+      expect(filterComplexArg).toContain('anullsrc=r=48000:cl=stereo,atrim=duration=4[a_silent]');
+      expect(args).toContain('-map');
+      expect(args).toContain('[a_silent]');
+    });
+
+    it('correctly maps audio only from video/audio clips on mixed timelines with images', () => {
+      const project = createDefaultProject('Mixed Timeline Test', '16:9');
+      project.durationMs = 5000;
+      project.assets = [
+        {
+          id: 'asset_v1',
+          name: 'video_with_audio.mp4',
+          type: 'video',
+          relativePath: 'assets/v1.mp4',
+          originalPath: 'C:/Media/v1.mp4',
+          fileSize: 5000000,
+          durationMs: 5000,
+          isBundled: true,
+          hasAudio: true,
+        },
+        {
+          id: 'asset_i1',
+          name: 'overlay_logo.png',
+          type: 'image',
+          relativePath: 'assets/logo.png',
+          originalPath: 'C:/Media/logo.png',
+          fileSize: 50000,
+          durationMs: 5000,
+          isBundled: true,
+          hasAudio: false,
+        },
+      ];
+
+      const videoClip: Clip = {
+        id: 'clip_v1',
+        assetId: 'asset_v1',
+        trackId: 'track_video_main',
+        name: 'Main Video',
+        type: 'video',
+        startMs: 0,
+        durationMs: 5000,
+        sourceStartMs: 0,
+        sourceEndMs: 5000,
+        speed: 1,
+        volume: 1,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        transform: { positionX: 0, positionY: 0, scale: 1, rotation: 0, opacity: 1 },
+        keyframes: [],
+      };
+      const logoClip: Clip = {
+        id: 'clip_logo',
+        assetId: 'asset_i1',
+        trackId: 'track_overlay_1',
+        name: 'Logo Stamp',
+        type: 'image',
+        startMs: 0,
+        durationMs: 5000,
+        sourceStartMs: 0,
+        sourceEndMs: 5000,
+        speed: 1,
+        volume: 1,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        transform: { positionX: 40, positionY: 40, scale: 0.2, rotation: 0, opacity: 1 },
+        keyframes: [],
+      };
+
+      project.tracks[1].clips = [logoClip];
+      project.tracks[2].clips = [videoClip];
+
+      const { args } = buildFFmpegExportArgs(
+        project,
+        EXPORT_PRESETS[0],
+        'C:/Exports/mixed.mp4',
+        (id) => (id === 'asset_v1' ? 'C:/Media/v1.mp4' : 'C:/Media/logo.png')
+      );
+
+      const filterComplexArg = args[args.indexOf('-filter_complex') + 1];
+
+      // v1 is on track 2 and has audio: [1:a] is processed
+      expect(filterComplexArg).toContain('[1:a]');
+      // logo is on track 1 (image without audio): [0:a] MUST NOT exist
+      expect(filterComplexArg).not.toContain('[0:a]');
+
+      // Audio trimmed to duration
+      expect(filterComplexArg).toContain('atrim=duration=5[a_final]');
+    });
+  });
+
+  describe('11. ProRes Container Format Validation', () => {
+    it('rejects MP4 extension for Apple ProRes codec and suggests MOV', () => {
+      const project = createDefaultProject('ProRes Validation', '16:9');
+      project.durationMs = 2000;
+      const clip: Clip = {
+        id: 'clip_pr_v',
+        trackId: 'track_video_main',
+        name: 'Master',
+        type: 'video',
+        startMs: 0,
+        durationMs: 2000,
+        sourceStartMs: 0,
+        sourceEndMs: 2000,
+        speed: 1,
+        volume: 1,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        transform: { positionX: 0, positionY: 0, scale: 1, rotation: 0, opacity: 1 },
+        keyframes: [],
+      };
+      project.tracks[2].clips = [clip];
+
+      const proresPreset = EXPORT_PRESETS.find((p) => p.id === 'prores_hq')!;
+
+      // Invalid .mp4 destination
+      const invalidRes = validateProjectForExport(
+        project,
+        proresPreset,
+        'C:/Exports/master.mp4',
+        () => 'C:/Media/clip.mp4'
+      );
+      expect(invalidRes.isValid).toBe(false);
+      expect(invalidRes.errors.some((e) => e.includes('Apple ProRes'))).toBe(true);
+
+      // Valid .mov destination
+      const validRes = validateProjectForExport(
+        project,
+        proresPreset,
+        'C:/Exports/master.mov',
+        () => 'C:/Media/clip.mp4'
+      );
+      expect(validRes.isValid).toBe(true);
     });
   });
 });

@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('vnestNative', {
   generateProxy: (jobId, inputPath, quality, totalDurationSec) => ipcRenderer.invoke('generate-proxy', jobId, inputPath, quality, totalDurationSec),
   cancelProxyJob: (jobId) => ipcRenderer.invoke('cancel-proxy-job', jobId),
   deleteProxyFile: (filePath) => ipcRenderer.invoke('delete-proxy-file', filePath),
+  deleteFile: (filePath) => ipcRenderer.invoke('delete-file', filePath),
   onProxyProgress: (callback) => {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('proxy-job-progress', handler);

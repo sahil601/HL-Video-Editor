@@ -239,7 +239,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     if (!destination) {
       if (window.vnestNative?.selectExportDestination) {
         const ext = effectivePreset.format || 'mp4';
-        const chosen = await window.vnestNative.selectExportDestination(`${project.name}.${ext}`);
+        const defaultFilename = `${project.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${effectivePreset.name.split(' ')[0]}.${ext}`;
+        const chosen = await window.vnestNative.selectExportDestination(defaultFilename);
         if (!chosen) return false;
         destination = chosen;
         setOutputPath(chosen);
@@ -249,6 +250,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       }
     }
 
+    // Ensure destination extension matches chosen preset container format
+    const requiredFormat = effectivePreset.format || 'mp4';
+    if (!destination.toLowerCase().endsWith(`.${requiredFormat}`)) {
+      if (destination.includes('.')) {
+        destination = destination.replace(/\.[a-zA-Z0-9]+$/, `.${requiredFormat}`);
+      } else {
+        destination = `${destination}.${requiredFormat}`;
+      }
+      setOutputPath(destination);
+    }
+
+    const tempFiles: string[] = [];
     let tempSrtPath: string | undefined;
     let captionStyle: CaptionStyle | undefined;
 
@@ -256,7 +269,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const srt = generateProjectSrt(project);
       if (srt.trim()) {
         const tempName = `hl_burn_${Date.now()}.srt`;
-        tempSrtPath = destination.replace(/[\\/][^\\/]+$/, `\\${tempName}`);
+        tempSrtPath = destination.replace(/[\\/][^\\/]+$/, `/${tempName}`);
+        tempFiles.push(tempSrtPath);
         if (window.vnestNative?.saveTextFile) {
           await window.vnestNative.saveTextFile(tempSrtPath, srt);
         }
@@ -386,6 +400,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       elementPathMap,
       blobPathMap,
       lutPathMap,
+      tempFiles,
       assetPathResolver,
     });
 

@@ -46,6 +46,7 @@ export interface ProjectAsset {
   proxyError?: string;
   proxyQuality?: ProxyQuality;
   proxyFileSize?: number;
+  hasAudio?: boolean;
 }
 
 export type TrackType = 'video' | 'overlay' | 'audio' | 'text';
